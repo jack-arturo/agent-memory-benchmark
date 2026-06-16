@@ -147,7 +147,10 @@ class GeminiLLM(LLM):
             except Exception as e:
                 msg = str(e)
                 if ("429" in msg or "RESOURCE_EXHAUSTED" in msg or
-                        "503" in msg or "UNAVAILABLE" in msg):
+                        "503" in msg or "UNAVAILABLE" in msg or
+                        "ReadError" in msg or "connection reset" in msg.lower() or
+                        "RemoteProtocolError" in msg or "timed out" in msg or
+                        "ConnectionError" in msg):
                     if attempt < _MAX_RETRIES - 1:
                         logger.warning("[gemini] retry %d/%d after %.0fs — %s", attempt + 1, _MAX_RETRIES, delay, msg[:120])
                         time.sleep(delay)
