@@ -6,7 +6,7 @@ ingest() POSTs /memory (chunked, backdated); retrieve() GETs /recall and extract
 content from item["memory"]["content"] (top-level "content" is always empty).
 """
 from __future__ import annotations
-import json, os, re, socket, subprocess, time, urllib.error, urllib.parse, urllib.request, uuid
+import atexit, json, os, re, socket, subprocess, time, urllib.error, urllib.parse, urllib.request, uuid
 from pathlib import Path
 from ..models import Document
 from .base import MemoryProvider
@@ -85,6 +85,8 @@ class AutoMemMemoryProvider(MemoryProvider):
                              "AUTOMEM_QDRANT_PORT": str(qdr)}
         subprocess.run(["docker", "compose", "-p", self._project, "-f", str(_COMPOSE), "up", "-d"],
                        env=self._compose_env, check=True)
+        # Ensure the stack is torn down even if the harness crashes before calling cleanup().
+        atexit.register(self.cleanup)
         self._endpoint = f"http://localhost:{api}"
         for _ in range(60):
             try:
