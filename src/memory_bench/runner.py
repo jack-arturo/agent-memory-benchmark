@@ -125,7 +125,12 @@ class EvalRunner:
             # For isolated datasets with a query limit, only load docs for the queried units
             # to avoid loading the entire dataset into memory unnecessarily.
             query_user_ids = {q.user_id for q in queries if q.user_id}
-            documents = dataset.load_documents(split, category=doc_category, limit=doc_limit, user_ids=query_user_ids)
+            try:
+                documents = dataset.load_documents(split, category=doc_category, limit=doc_limit, user_ids=query_user_ids)
+            except TypeError:
+                # Not every dataset's load_documents accepts user_ids (only longmemeval does);
+                # fall back to the full limit-bounded load for the rest.
+                documents = dataset.load_documents(split, category=doc_category, limit=doc_limit)
             console.print(f"  {len(documents)} documents loaded")
         else:
             documents = dataset.load_documents(split, category=doc_category, limit=doc_limit)
