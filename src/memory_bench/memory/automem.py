@@ -6,7 +6,7 @@ ingest() POSTs /memory (chunked, backdated); retrieve() GETs /recall and extract
 content from item["memory"]["content"] (top-level "content" is always empty).
 """
 from __future__ import annotations
-import atexit, json, os, re, socket, subprocess, time, urllib.error, urllib.parse, urllib.request, uuid
+import atexit, http.client, json, os, re, socket, subprocess, time, urllib.error, urllib.parse, urllib.request, uuid
 from pathlib import Path
 from ..models import Document
 from .base import MemoryProvider
@@ -73,6 +73,10 @@ class AutoMemMemoryProvider(MemoryProvider):
         self._max_chars = int(os.environ.get("AUTOMEM_MAX_CHARS", "1800"))
         self._k_override = os.environ.get("AUTOMEM_RECALL_K")
         self._enrich_settle_s = int(os.environ.get("AUTOMEM_ENRICH_SETTLE_SECONDS", "120"))
+        # Backpressure during ingest so the async enrichment queue can't grow unbounded
+        # and OOM-kill the container (set max_pending<=0 to disable).
+        self._enrich_drain_every = int(os.environ.get("AUTOMEM_ENRICH_DRAIN_EVERY", "100"))
+        self._enrich_max_pending = int(os.environ.get("AUTOMEM_ENRICH_MAX_PENDING", "150"))
         self._project = f"automem_amb_{uuid.uuid4().hex[:8]}"
         self._endpoint = None
         self._run_tag = f"ambrun-{uuid.uuid4().hex[:8]}"
@@ -103,7 +107,7 @@ class AutoMemMemoryProvider(MemoryProvider):
             subprocess.run(["docker", "compose", "-p", self._project, "-f", str(_COMPOSE), "down", "-v"],
                            env=self._compose_env, check=False)
 
-    def _req(self, method, path, *, params=None, body=None):
+    def _req(self, method, path, *, params=None, body=None, _retries=5):
         url = f"{self._endpoint}{path}"
         if params:
             url = f"{url}?{urllib.parse.urlencode(params, doseq=True)}"
@@ -112,9 +116,22 @@ class AutoMemMemoryProvider(MemoryProvider):
         if data is not None:
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        with urllib.request.urlopen(req, timeout=60) as r:
-            raw = r.read()
-        return json.loads(raw) if raw else {}
+        for attempt in range(_retries):
+            try:
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    raw = r.read()
+                return json.loads(raw) if raw else {}
+            except urllib.error.HTTPError:
+                # A real HTTP response (e.g. 400 for over-limit content) — never retry;
+                # callers handle these (ingest skips 400s).
+                raise
+            except (urllib.error.URLError, http.client.RemoteDisconnected,
+                    http.client.IncompleteRead, ConnectionError, TimeoutError, OSError):
+                # AutoMem drops connections under ingest/enrichment load; retry with backoff
+                # so a transient blip doesn't kill a multi-thousand-query run.
+                if attempt == _retries - 1:
+                    raise
+                time.sleep(min(2 ** attempt, 20))
 
     def _scoped_tags(self, user_id):
         tags = [self._run_tag]
@@ -123,6 +140,7 @@ class AutoMemMemoryProvider(MemoryProvider):
         return tags
 
     def ingest(self, documents) -> None:
+        posted = 0
         for doc in documents:
             tags = self._scoped_tags(doc.user_id)
             pieces = _chunk_text(doc.content, self._max_chars)
@@ -135,11 +153,28 @@ class AutoMemMemoryProvider(MemoryProvider):
                     body["timestamp"] = doc.timestamp
                 try:
                     self._req("POST", "/memory", body=body)
+                    posted += 1
                 except urllib.error.HTTPError as exc:
                     if exc.code == 400:
                         continue
                     raise
+                # Bound the async enrichment backlog: bulk ingest outruns the worker, and
+                # an unbounded queue grows memory until the container is OOM-killed.
+                if posted % self._enrich_drain_every == 0:
+                    self._bound_enrichment_queue()
         self._settle_enrichment()
+
+    def _bound_enrichment_queue(self) -> None:
+        if self._enrich_max_pending <= 0:
+            return
+        for _ in range(120):  # up to ~4 min of backpressure
+            try:
+                pending = self._req("GET", "/health").get("enrichment", {}).get("pending", 0)
+            except Exception:
+                return
+            if pending <= self._enrich_max_pending:
+                return
+            time.sleep(2)
 
     def _settle_enrichment(self) -> None:
         if self._enrich_settle_s <= 0:

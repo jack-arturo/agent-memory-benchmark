@@ -19,3 +19,4 @@ services:
       VECTOR_SIZE: "768"
       AUTOMEM_API_TOKEN: benchmark-token
       JIT_ENRICHMENT_ENABLED: "true"
+      ENRICHMENT_ENABLE_SUMMARIES: "false"  # no LLM summaries (lean, no external deps)

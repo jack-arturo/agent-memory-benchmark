@@ -64,3 +64,40 @@ def test_retrieve_extracts_nested_content(monkeypatch):
     docs, _ = p.retrieve("q", k=5, user_id="u1")
     assert docs[0].content == "answer"
     assert "expand_relations=true" in fake.calls[0][1]
+
+
+def test_req_retries_remote_disconnected(monkeypatch):
+    import http.client
+    calls = {"n": 0}
+    class _OK:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b'{"ok": 1}'
+    def flaky_urlopen(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise http.client.RemoteDisconnected("Remote end closed connection")
+        return _OK()
+    monkeypatch.setattr(m.urllib.request, "urlopen", flaky_urlopen)
+    monkeypatch.setattr(m.time, "sleep", lambda *_: None)
+    p = AutoMemMemoryProvider()
+    p._endpoint = "http://x:8001"; p._token = "t"
+    assert p._req("GET", "/health") == {"ok": 1}
+    assert calls["n"] == 2  # retried past the disconnect
+
+
+def test_req_does_not_retry_http_error(monkeypatch):
+    import urllib.error
+    calls = {"n": 0}
+    def boom(req, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(req.full_url, 400, "bad", {}, None)
+    monkeypatch.setattr(m.urllib.request, "urlopen", boom)
+    p = AutoMemMemoryProvider()
+    p._endpoint = "http://x:8001"; p._token = "t"
+    try:
+        p._req("POST", "/memory", body={"content": "x"})
+        raised = False
+    except urllib.error.HTTPError:
+        raised = True
+    assert raised and calls["n"] == 1  # 400 raised immediately, not retried
