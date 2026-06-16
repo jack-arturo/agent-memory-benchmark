@@ -20,3 +20,4 @@ services:
       AUTOMEM_API_TOKEN: benchmark-token
       JIT_ENRICHMENT_ENABLED: "true"
       ENRICHMENT_ENABLE_SUMMARIES: "false"  # no LLM summaries (lean, no external deps)
+      ENRICHMENT_ENABLED: "false"           # async enrichment worker off (fast + low-mem); JIT inline recall enrichment stays on

@@ -71,6 +71,7 @@ class AutoMemMemoryProvider(MemoryProvider):
         self._image = os.environ.get("AUTOMEM_IMAGE", _DEFAULT_IMAGE)
         self._token = os.environ.get("AUTOMEM_TOKEN", "benchmark-token")
         self._max_chars = int(os.environ.get("AUTOMEM_MAX_CHARS", "1800"))
+        self._batch_size = int(os.environ.get("AUTOMEM_BATCH_SIZE", "50"))  # /memory/batch, max 500
         self._k_override = os.environ.get("AUTOMEM_RECALL_K")
         self._enrich_settle_s = int(os.environ.get("AUTOMEM_ENRICH_SETTLE_SECONDS", "120"))
         # Backpressure during ingest so the async enrichment queue can't grow unbounded
@@ -140,7 +141,10 @@ class AutoMemMemoryProvider(MemoryProvider):
         return tags
 
     def ingest(self, documents) -> None:
-        posted = 0
+        # Flatten docs into chunked memory items, then POST /memory/batch (which
+        # batch-embeds + UNWINDs graph writes). One-at-a-time POST /memory is ~0.8s/doc
+        # on CPU FastEmbed; batching is the difference between hours and days.
+        items = []
         for doc in documents:
             tags = self._scoped_tags(doc.user_id)
             pieces = _chunk_text(doc.content, self._max_chars)
@@ -148,20 +152,30 @@ class AutoMemMemoryProvider(MemoryProvider):
                 meta = {"amb_doc_id": doc.id, "amb_user_id": doc.user_id, "amb_run": self._run_tag}
                 if len(pieces) > 1:
                     meta["amb_chunk"] = i
-                body = {"content": piece, "tags": tags, "importance": 0.6, "metadata": meta}
+                item = {"content": piece, "tags": tags, "importance": 0.6, "metadata": meta}
                 if doc.timestamp:
-                    body["timestamp"] = doc.timestamp
-                try:
-                    self._req("POST", "/memory", body=body)
-                    posted += 1
-                except urllib.error.HTTPError as exc:
-                    if exc.code == 400:
-                        continue
-                    raise
-                # Bound the async enrichment backlog: bulk ingest outruns the worker, and
-                # an unbounded queue grows memory until the container is OOM-killed.
-                if posted % self._enrich_drain_every == 0:
-                    self._bound_enrichment_queue()
+                    item["timestamp"] = doc.timestamp
+                items.append(item)
+        posted = 0
+        for start in range(0, len(items), self._batch_size):
+            batch = items[start:start + self._batch_size]
+            try:
+                self._req("POST", "/memory/batch", body={"memories": batch})
+                posted += len(batch)
+            except urllib.error.HTTPError:
+                # A bad item (e.g. over-limit) fails the whole batch; fall back to
+                # per-item posts for this batch so one bad chunk doesn't drop the rest.
+                for item in batch:
+                    try:
+                        self._req("POST", "/memory", body=item)
+                        posted += 1
+                    except urllib.error.HTTPError as exc:
+                        if exc.code == 400:
+                            continue
+                        raise
+            # Bound the async enrichment backlog (no-op when ENRICHMENT_ENABLED=false).
+            if posted % self._enrich_drain_every < self._batch_size:
+                self._bound_enrichment_queue()
         self._settle_enrichment()
 
     def _bound_enrichment_queue(self) -> None:

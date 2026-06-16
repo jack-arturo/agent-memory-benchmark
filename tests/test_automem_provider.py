@@ -42,19 +42,21 @@ class _FakeHTTP:
         yield io.BytesIO(json.dumps(payload).encode())
 
 
-def test_ingest_chunks_and_posts(monkeypatch):
-    fake = _FakeHTTP([{"id": str(i)} for i in range(40)])
+def test_ingest_batches_chunks(monkeypatch):
+    fake = _FakeHTTP([{"stored": 99} for _ in range(10)])
     monkeypatch.setattr(m.urllib.request, "urlopen", fake.urlopen)
     p = AutoMemMemoryProvider()
-    p._endpoint = "http://x:8001"; p._token = "t"; p._run_tag = "ambrun-test"; p._enrich_settle_s = 0
+    p._endpoint = "http://x:8001"; p._token = "t"; p._run_tag = "ambrun-test"
+    p._enrich_settle_s = 0; p._enrich_max_pending = 0
     long_doc = Document(id="d", content=" ".join(f"s{i}." for i in range(600)), user_id="u1")
     p.ingest([long_doc])
-    stores = [c for c in fake.calls if c[1].endswith("/memory")]
-    assert len(stores) > 1
-    for _, _, _, body in stores:
-        payload = json.loads(body)
-        assert len(payload["content"]) <= 1800
-        assert "ambrun-test" in payload["tags"]
+    batches = [c for c in fake.calls if c[1].endswith("/memory/batch")]
+    assert len(batches) >= 1  # chunks go out as a batch, not one-by-one
+    items = json.loads(batches[0][3])["memories"]
+    assert len(items) > 1
+    for it in items:
+        assert len(it["content"]) <= 1800
+        assert "ambrun-test" in it["tags"]
 
 def test_retrieve_extracts_nested_content(monkeypatch):
     fake = _FakeHTTP([{"results": [{"id": "m9", "memory": {"content": "answer"}}]}])
