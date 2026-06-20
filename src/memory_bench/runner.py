@@ -347,8 +347,21 @@ class EvalRunner:
 
         else:
             # Batch mode: ingest all documents upfront, then answer all queries.
+            # Resume (--skip-ingested): skip queries already answered in a prior crashed run.
+            if skip_ingested:
+                prev = self._load_previous(dataset.name, split, effective_name, mode.name)
+                done_ids = {r["query_id"] for r in prev.get("results", []) if r.get("answer")}
+                if done_ids:
+                    before = len(queries)
+                    queries = [q for q in queries if q.id not in done_ids]
+                    console.print(f"[dim]Resume: skipping {before - len(queries)} already-answered queries (--skip-ingested).[/dim]")
+
             if skip_ingestion:
                 console.print(f"[dim]Skipping ingestion (--skip-ingestion).[/dim]\n")
+                ingestion_ms = self._load_previous_ingestion_ms(dataset.name, split, effective_name, mode.name)
+                ingested_docs_count = self._load_previous_ingested_docs(dataset.name, split, effective_name, mode.name)
+            elif not queries:
+                console.print(f"[dim]Resume: all queries already answered; skipping ingestion.[/dim]\n")
                 ingestion_ms = self._load_previous_ingestion_ms(dataset.name, split, effective_name, mode.name)
                 ingested_docs_count = self._load_previous_ingested_docs(dataset.name, split, effective_name, mode.name)
             else:
@@ -359,15 +372,38 @@ class EvalRunner:
                 ingested_docs_count = len(documents)
                 console.print(f"  ingested in {ingestion_ms:.0f}ms ({ingestion_ms / len(documents):.1f}ms/doc avg)\n")
 
+            _SAVE_EVERY = 10
+
             async def _run_all(progress, task_id):
                 concurrency = getattr(memory, "concurrency", _CONCURRENCY)
                 sem = asyncio.Semaphore(concurrency)
                 results = [None] * len(queries)
+                save_lock = asyncio.Lock()
+                completed = 0
 
                 async def bounded(i, q):
+                    nonlocal completed
                     async with sem:
                         results[i] = await _process_one(q)
                         progress.advance(task_id)
+                    # Save incrementally so a mid-run crash (e.g. quota wall) keeps partial
+                    # progress; _save merges by query_id so snapshots compose with the final save.
+                    async with save_lock:
+                        completed += 1
+                        if completed % _SAVE_EVERY == 0:
+                            done = [r for r in results if r]
+                            self._save(EvalSummary(
+                                dataset=dataset.name, split=split, category=category,
+                                memory_provider=memory.name, run_name=effective_name,
+                                mode=mode.name, oracle=oracle,
+                                total_queries=len(done),
+                                correct=sum(1 for r in done if r.correct),
+                                accuracy=0.0, ingestion_time_ms=round(ingestion_ms, 1),
+                                ingested_docs=ingested_docs_count,
+                                description=description, answer_llm=mode.llm_id,
+                                judge_llm=self._get_judge(dataset)._llm.model_id,
+                                results=done,
+                            ))
 
                 await asyncio.gather(*[bounded(i, q) for i, q in enumerate(queries)])
                 return results
