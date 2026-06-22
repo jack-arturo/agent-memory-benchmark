@@ -155,11 +155,14 @@ class GeminiLLM(LLM):
                 )
             except Exception as e:
                 msg = str(e)
-                if ("429" in msg or "RESOURCE_EXHAUSTED" in msg or
-                        "503" in msg or "UNAVAILABLE" in msg or
-                        "ReadError" in msg or "connection reset" in msg.lower() or
-                        "RemoteProtocolError" in msg or "timed out" in msg or
-                        "ConnectionError" in msg):
+                low = msg.lower()
+                # Retry ANY transient server (5xx) or connection error. A bare 504
+                # DEADLINE_EXCEEDED crashed a beam run because it wasn't listed here.
+                if ("429" in msg or "500" in msg or "502" in msg or "503" in msg or
+                        "504" in msg or "RESOURCE_EXHAUSTED" in msg or "UNAVAILABLE" in msg or
+                        "DEADLINE_EXCEEDED" in msg or "INTERNAL" in msg or "ServerError" in msg or
+                        "overloaded" in low or "ReadError" in msg or "connection reset" in low or
+                        "RemoteProtocolError" in msg or "timed out" in low or "ConnectionError" in msg):
                     if attempt < _MAX_RETRIES - 1:
                         logger.warning("[gemini] retry %d/%d after %.0fs — %s", attempt + 1, _MAX_RETRIES, delay, msg[:120])
                         time.sleep(delay)

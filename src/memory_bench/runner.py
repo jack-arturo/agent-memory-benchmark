@@ -164,7 +164,7 @@ class EvalRunner:
                     return await _process_one_attempt(q)
                 except Exception as exc:
                     msg = str(exc)
-                    if _attempt < 3 and any(code in msg for code in ("502", "503", "529", "429", "overloaded", "quota")):
+                    if _attempt < 3 and any(code in msg for code in ("500", "502", "503", "504", "529", "429", "overloaded", "quota", "UNAVAILABLE", "DEADLINE_EXCEEDED", "RESOURCE_EXHAUSTED", "INTERNAL", "ServerError", "timed out")):
                         wait = 15 * (2 ** _attempt)
                         logger.warning("[query:%s] transient error (attempt %d/4), retrying in %ds: %s", q.id, _attempt + 1, wait, msg[:120])
                         await asyncio.sleep(wait)
