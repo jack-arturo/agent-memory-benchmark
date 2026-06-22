@@ -21,8 +21,17 @@ _RETRY_BASE_DELAY = 5   # seconds — doubles on each attempt (5, 10, 20, 40, 80
 
 
 class GeminiLLM(LLM):
+    # Per-request timeout (ms). Without this, a stalled connection during a 503
+    # overload storm blocks generate_content() forever — the retry loop never
+    # fires because nothing is raised. 180s is ~2.6x the slowest legit pro
+    # reasoning call observed (~68s), so it only trips on true hangs, which then
+    # surface as "timed out" and get retried by _generate_raw().
+    _REQUEST_TIMEOUT_MS = 180_000
+
     def __init__(self, model: str = "gemini-2.5-flash-lite"):
-        self._client = genai.Client()
+        self._client = genai.Client(
+            http_options=types.HttpOptions(timeout=self._REQUEST_TIMEOUT_MS)
+        )
         self._model = model
 
     @property
