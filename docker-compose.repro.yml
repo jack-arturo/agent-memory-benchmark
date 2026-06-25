@@ -1,0 +1,49 @@
+# One-command reproduction of the AutoMem AMB submission.
+#
+#   make repro-smoke                       # 5-query end-to-end sanity check
+#   make repro DATASET=beam SPLIT=1m       # a full split
+#
+# (or call it directly:)
+#   GEMINI_API_KEY=... docker compose -f docker-compose.repro.yml run --rm runner \
+#       omb run --memory automem --dataset locomo --split locomo10 --name automem-sub
+#
+# Needs only Docker + a GEMINI_API_KEY. The runner builds locally and pulls just
+# the AutoMem service image (AUTOMEM_IMAGE); the harness toolchain is in the image.
+services:
+  runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: amb-runner:local
+    working_dir: /app
+    # The provider spins the AutoMem stack on the HOST daemon via the mounted
+    # socket, so its published ports live on the host — reach them through the
+    # host gateway, not the runner's own localhost.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      AUTOMEM_HOST: host.docker.internal
+      # Pin the stack's published ports so host.docker.internal:<port> is
+      # deterministic (a port free inside this container may be taken on the host).
+      AUTOMEM_API_PORT: "18001"
+      AUTOMEM_FALKOR_PORT: "16379"
+      AUTOMEM_QDRANT_PORT: "16333"
+      # AutoMem service image — defaults to the published tag; override to
+      # ...:amb-local before the public image is pushed.
+      AUTOMEM_IMAGE: ${AUTOMEM_IMAGE:-ghcr.io/verygoodplugins/automem:amb-v1}
+      # Shared answer/judge LLM (the board's pinned Gemini models). Only the key
+      # crosses into the container; nothing else from your shell reaches the
+      # lean (no-LLM) AutoMem stack.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OMB_ANSWER_LLM: gemini
+      OMB_ANSWER_MODEL: gemini-3.1-pro-preview
+      OMB_JUDGE_LLM: gemini
+      OMB_JUDGE_MODEL: gemini-2.5-flash-lite
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # spin the sibling AutoMem stack
+      - ./outputs:/app/outputs                       # persist per-query result JSON
+      - ./data:/app/data:ro                          # committed dataset sources
+      - amb_datasets:/app/.datasets                  # download cache (HF / locomo)
+
+volumes:
+  amb_datasets:

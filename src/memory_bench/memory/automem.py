@@ -84,7 +84,12 @@ class AutoMemMemoryProvider(MemoryProvider):
         self._compose_env = None
 
     def initialize(self) -> None:
-        api, falk, qdr = _free_port(), _free_port(), _free_port()
+        # Honor pre-set ports (the dockerized repro pins them so the in-container
+        # harness can reach the host-published stack deterministically); else pick
+        # free ones for concurrent host runs.
+        api = int(os.environ.get("AUTOMEM_API_PORT") or _free_port())
+        falk = int(os.environ.get("AUTOMEM_FALKOR_PORT") or _free_port())
+        qdr = int(os.environ.get("AUTOMEM_QDRANT_PORT") or _free_port())
         self._compose_env = {**os.environ, "AUTOMEM_IMAGE": self._image,
                              "AUTOMEM_API_PORT": str(api), "AUTOMEM_FALKOR_PORT": str(falk),
                              "AUTOMEM_QDRANT_PORT": str(qdr)}
@@ -92,7 +97,9 @@ class AutoMemMemoryProvider(MemoryProvider):
                        env=self._compose_env, check=True)
         # Ensure the stack is torn down even if the harness crashes before calling cleanup().
         atexit.register(self.cleanup)
-        self._endpoint = f"http://localhost:{api}"
+        # Default localhost (host runs); a containerized harness sets AUTOMEM_HOST=
+        # host.docker.internal to reach the sibling stack published on the host.
+        self._endpoint = f"http://{os.environ.get('AUTOMEM_HOST', 'localhost')}:{api}"
         for _ in range(60):
             try:
                 body = self._req("GET", "/health")

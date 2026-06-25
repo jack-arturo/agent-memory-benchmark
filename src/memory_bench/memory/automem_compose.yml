@@ -1,7 +1,7 @@
 # Spun by the AutoMem provider. Ports + project name are overridden per run.
 services:
   falkordb:
-    image: falkordb/falkordb:latest
+    image: falkordb/falkordb:v4.18.3  # pinned (was :latest) for reproducibility — graph module 41803, the version the submission ran
     ports: ["${AUTOMEM_FALKOR_PORT:-6379}:6379"]
   qdrant:
     image: qdrant/qdrant:v1.11.3
